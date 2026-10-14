@@ -1,32 +1,73 @@
-name: Build and push Docker image
+name: Build Docker image
 
 on:
   push:
     branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
-  docker:
+  build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write          # needed to push to GitHub Container Registry
+
     steps:
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v4
-        with:
-          username: ${{ vars.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-qemu-action@v3        # for the arm64 build
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Check files
-        run: |
-            pwd
-            ls -la
-            find . -maxdepth 3 -iname '*dockerfile*' -print
-
-      - name: Build and push
-        uses: docker/build-push-action@v7
+      # Smoke test: build for the runner, start the container, request the start page.
+      - name: Build (test image)
+        uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile
-          push: true
-          tags: ${{ vars.DOCKERHUB_USERNAME }}/doom-wad-analyzer:latest
+          load: true
+          tags: wad-analyzer:test
+          cache-from: type=gha
+      - name: Smoke test
+        run: |
+          docker run -d --name t -p 8000:8000 --read-only wad-analyzer:test
+          for i in $(seq 1 15); do curl -fsS http://localhost:8000/ >/dev/null && ok=1 && break; sleep 1; done
+          docker logs t
+          docker rm -f t
+          test "${ok:-0}" = 1
+
+      # Publish only for pushes to main / version tags (not for pull requests).
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push (amd64 + arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
