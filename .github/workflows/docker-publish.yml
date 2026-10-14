@@ -17,9 +17,16 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      - name: Check files
+        run: |
+            pwd
+            ls -la
+            find . -maxdepth 3 -iname '*dockerfile*' -print
+
       - name: Build and push
         uses: docker/build-push-action@v7
         with:
           context: .
+          file: ./Dockerfile
           push: true
           tags: ${{ vars.DOCKERHUB_USERNAME }}/doom-wad-analyzer:latest
